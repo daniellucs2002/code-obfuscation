@@ -7,12 +7,23 @@ from transformers import RobertaTokenizer, RobertaForMaskedLM, DataCollatorForLa
 
 import torch
 from torch.utils.data import DataLoader
+import argparse
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+parser = argparse.ArgumentParser()
 
-# step 1: prepare the raw data
+parser.add_argument('--cuda', type=int, default=0, help='CUDA ID (0-3)')
+parser.add_argument('--files', type=int, default=14, help='file numbers to be processed (1-14)')
 
-files = sorted(Path('../data/python/').glob('**/*.jsonl'))
+args = parser.parse_args()
+
+device = torch.device(f"cuda:{args.cuda}" if torch.cuda.is_available() else "cpu")
+
+# step 1: prepare the raw data (python)
+
+files = []
+for i in range(0, args.files):
+    files.extend(Path('../data/python/').glob(f'**/python_train_{i}.jsonl.gz'))
+
 codes = pd.concat([pd.read_json(f,
                                 orient='records',
                                 lines=True)[['code_tokens']]
