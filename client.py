@@ -3,6 +3,7 @@ pd.set_option('max_colwidth',300)
 
 from datasets import Dataset
 from pathlib import Path
+from transformers import logging as transformers_logging
 from transformers import RobertaTokenizer, RobertaForMaskedLM, DataCollatorForLanguageModeling
 
 import torch
@@ -13,6 +14,11 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument('--cuda', type=int, default=0, help='CUDA ID (0-3)')
 parser.add_argument('--files', type=int, default=14, help='file numbers to be processed (1-14)')
+parser.add_argument('--peek', type=int, default=0, help='print out samples during developing phase')
+parser.add_argument('--versions', type=int, default=3, help='number of obfuscation versions in the comparison dataset')
+parser.add_argument('--batch', type=int, default=32, help='batch size for the client side model')
+parser.add_argument('--masked', type=float, default=0.1, help='probability to introduce <mask> token')
+parser.add_argument('--topk', type=int, default=5, help='use top_k sampling method')
 
 args = parser.parse_args()
 
@@ -26,17 +32,21 @@ for i in range(0, args.files):
 
 codes = pd.concat([pd.read_json(f,
                                 orient='records',
+                                compression='gzip',
                                 lines=True)[['code_tokens']]
                    for f in files], sort=False)
 codes['filtered_code_tokens'] = [[token for token in row if len(token) > 0 and token[0] != '#']
                                 for row in codes['code_tokens']]
 codes['code_string'] = [' '.join(row) for row in codes['filtered_code_tokens']]
 
-codes = codes.iloc[:64]  # constrain to the first two batches
+if args.peek != 0:
+    codes = codes.iloc[:args.peek]  # constrain to the first few batches
 hf_codes = Dataset.from_pandas(codes)
 
+transformers_logging.set_verbosity_error()
 tokenizer = RobertaTokenizer.from_pretrained("microsoft/codebert-base-mlm")
 model = RobertaForMaskedLM.from_pretrained("microsoft/codebert-base-mlm")
+transformers_logging.set_verbosity_warning()
 model.to(device)
 
 def tokenize_fn(example):
@@ -50,42 +60,13 @@ hf_codes = hf_codes.map(
     tokenize_fn,
     batched=True,
     num_proc=4,
-    remove_columns=hf_codes.column_names
-)
+    remove_columns=['code_tokens', 'filtered_code_tokens']
+)  # 'code_string'(original), 'input_ids', 'attention_mask'
 
-# step 2: introduce <mask> token
+# step 2: introduce <mask> token for comparison dataset
 
 data_collator = DataCollatorForLanguageModeling(
     tokenizer=tokenizer,
     mlm=True,
-    mlm_probability=0.1
+    mlm_probability=args.masked
 )
-
-dataloader = DataLoader(
-    hf_codes,
-    batch_size=32,
-    collate_fn=data_collator
-)
-
-print(tokenizer.mask_token_id)  # <mask> token
-print(hf_codes[0]['input_ids'])  # before processing
-print(next(iter(dataloader))['input_ids'][0])  # after processing
-
-# step 3: feed masked snippet into the model
-
-for batch in dataloader:
-    batch = {k: v.to(device) for k, v in batch.items()}
-    with torch.no_grad():
-        output = model(**batch)
-    print(output.logits.shape)  # torch.Size([32, 512, 50265])
-    input_ids = batch['input_ids']
-    predictions = torch.argmax(output.logits, dim=-1)
-
-    # iterate over each sample in the batch
-    for i in range(input_ids.size(0)):
-        masked_pos = (input_ids[i] == tokenizer.mask_token_id).nonzero(as_tuple=False)
-        for pos in masked_pos:
-            input_ids[i, pos] = predictions[i, pos]
-
-print(next(iter(dataloader))['input_ids'][0])  # final output of the client model
-print(dataloader.dataset)
