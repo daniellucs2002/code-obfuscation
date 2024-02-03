@@ -70,3 +70,52 @@ data_collator = DataCollatorForLanguageModeling(
     mlm=True,
     mlm_probability=args.masked
 )
+
+def generate_multiple_obfuscated_versions(batch):
+    # each batch: 'args.batch' samples; each sample: 'args.versions' obfuscations
+    obfuscated_versions = [[] for _ in range(args.batch)]
+
+    # introduce <mask> tokens using data collator, once for all
+    samples = [{
+        'input_ids': torch.tensor(input_id),
+        'attention_mask': torch.tensor(batch['attention_mask'][i])
+    } for i, input_id in enumerate(batch['input_ids'])]
+
+    masked_inputs = data_collator(samples)
+    masked_inputs = {k: v.to(device) for k, v in masked_inputs.items()}  # move data from cpu to gpu
+
+    for _ in range(args.versions):
+        with torch.no_grad():
+            outputs = model(**masked_inputs)
+
+        # iterate over batch size for top_k sampling and decoding
+        for i in range(len(batch['input_ids'])):
+            logits = outputs.logits[i]
+            input_id = masked_inputs['input_ids'][i].clone()  # cannot overwrite
+            mask_indices = (input_id == tokenizer.mask_token_id).nonzero(as_tuple=False)
+            for idx in mask_indices:
+                # apply top_k sampling for the idx-th masked position
+                topk_logits, topk_indices = torch.topk(logits[idx], args.topk)
+                probs = torch.nn.functional.softmax(topk_logits, dim=-1)
+                topk_token = topk_indices[0, torch.multinomial(probs, 1)[0, 0]]
+                input_id[idx] = topk_token
+
+            predicted_text = tokenizer.decode(input_id, skip_special_tokens=True)
+            obfuscated_versions[i].append(predicted_text)
+
+    batch['obfuscated_versions'] = obfuscated_versions
+    return batch
+
+# apply processing logic to each batch in the dataset
+obfuscated_dataset = hf_codes.map(
+    generate_multiple_obfuscated_versions,
+    batched=True,
+    batch_size=args.batch,
+    remove_columns=['input_ids', 'attention_mask']
+)
+
+import json
+
+data_dict = obfuscated_dataset.to_dict()
+with open('./dataset/client_output.json', 'w', encoding='utf-8') as f:
+    json.dump(data_dict, f, ensure_ascii=False, indent=4)
