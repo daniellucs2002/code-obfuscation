@@ -1,0 +1,39 @@
+// configure debugging in vscode
+
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug run_exp.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/CodeT5/CodeT5/sh/run_exp.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--model_tag", "codet5_base",
+                "--task", "summarize",
+                "--sub_task", "python",
+                "--gpu", "1"
+            ],
+            "cwd": "${workspaceFolder}/CodeT5/CodeT5/sh"
+        },
+        {
+            "name": "Attach to Remote",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "localhost",
+                "port": 5678
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}",
+                    "remoteRoot": "${workspaceFolder}"
+                }
+            ]
+        }
+    ]
+}

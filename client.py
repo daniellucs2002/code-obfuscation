@@ -33,11 +33,13 @@ for i in range(0, args.files):
 codes = pd.concat([pd.read_json(f,
                                 orient='records',
                                 compression='gzip',
-                                lines=True)[['code_tokens']]
+                                lines=True)[['code_tokens', 'docstring_tokens']]
                    for f in files], sort=False)
 codes['filtered_code_tokens'] = [[token for token in row if len(token) > 0 and token[0] != '#']
                                 for row in codes['code_tokens']]
 codes['code_string'] = [' '.join(row) for row in codes['filtered_code_tokens']]
+
+codes['target_summarize'] = [' '.join(row) for row in codes['docstring_tokens']]
 
 if args.peek != 0:
     codes = codes.iloc[:args.peek]  # constrain to the first few batches
@@ -60,8 +62,8 @@ hf_codes = hf_codes.map(
     tokenize_fn,
     batched=True,
     num_proc=4,
-    remove_columns=['code_tokens', 'filtered_code_tokens']
-)  # 'code_string'(original), 'input_ids', 'attention_mask'
+    remove_columns=['code_tokens', 'filtered_code_tokens', 'docstring_tokens']
+)  # 'code_string'(original), 'input_ids', 'attention_mask'; 'target_summarize'
 
 # step 2: introduce <mask> token for comparison dataset
 
@@ -116,6 +118,12 @@ obfuscated_dataset = hf_codes.map(
 
 import json
 
-data_dict = obfuscated_dataset.to_dict()
-with open('./dataset/client_output.json', 'w', encoding='utf-8') as f:
-    json.dump(data_dict, f, ensure_ascii=False, indent=4)
+# data_dict = obfuscated_dataset.to_dict()
+# with open('./dataset/client_output.json', 'w', encoding='utf-8') as f:
+#     json.dump(data_dict, f, ensure_ascii=False, indent=4)
+
+with open('./dataset/client_output.jsonl', 'w', encoding='utf-8') as f:
+    for item in obfuscated_dataset:
+        data_dict = item.to_dict() if hasattr(item, 'to_dict') else item
+        json_record = json.dumps(data_dict, ensure_ascii=False)
+        f.write(json_record + '\n')
