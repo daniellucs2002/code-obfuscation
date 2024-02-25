@@ -7,11 +7,14 @@ import time
 import multiprocessing
 from logger import logger
 from tqdm import tqdm
+import torch
+from torch.utils.data import TensorDataset
 
 from utils.file_operations import *
 from utils.model_operations import *
 
 from config.server_config import *
+from config.bleu_config import *
 
 class BleuRater(object):
     def __init__(self):
@@ -45,7 +48,14 @@ class BleuRater(object):
                 tqdm(tuple_examples, total=len(tuple_examples))
             )  # from tokens to ids
         # features(dev): 320 examples * 2 code snippets * 256 token_ids
+        all_source_ids = torch.tensor(features, dtype=torch.long)
+        self.data = TensorDataset(all_source_ids)
+        # torch.Size([320, 2, 256])
+        logger.info(f"  features shape: {self.data.tensors[0].shape}")
+
+    # calculate bleu score
 
 if __name__ == "__main__":
     bleu_rater = BleuRater()
     bleu_rater.prepare_examples()  # before feeding into the model
+    bleu_config = BleuConfig()
