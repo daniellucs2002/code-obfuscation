@@ -10,6 +10,10 @@ import torch
 from torch.utils.data import DataLoader
 import argparse
 
+import os
+os.environ['http_proxy'] = 'http://127.0.0.1:7890'
+os.environ['https_proxy'] = 'http://127.0.0.1:7890'
+
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--cuda', type=int, default=0, help='CUDA ID (0-3)')
@@ -27,12 +31,13 @@ device = torch.device(f"cuda:{args.cuda}" if torch.cuda.is_available() else "cpu
 # step 1: prepare the raw data (python)
 
 files = []
-for i in range(0, args.files):
-    files.extend(Path('../data/python/').glob(f'**/python_train_{i}.jsonl.gz'))
+# for i in range(0, args.files):
+#     files.extend(Path('../data/python/').glob(f'**/python_test_{i}.jsonl.gz'))
+files.append(Path('/data/common/CodeSearchNet/code2nl/python/test.jsonl'))  # test
 
 codes = pd.concat([pd.read_json(f,
                                 orient='records',
-                                compression='gzip',
+                                # compression='gzip',
                                 lines=True)[['code_tokens', 'docstring_tokens']]
                    for f in files], sort=False)
 codes['filtered_code_tokens'] = [[token for token in row if len(token) > 0 and token[0] != '#']
@@ -41,8 +46,12 @@ codes['code_string'] = [' '.join(row) for row in codes['filtered_code_tokens']]
 
 codes['target_summarize'] = [' '.join(row) for row in codes['docstring_tokens']]
 
-if args.peek != 0:
-    codes = codes.iloc[:args.peek]  # constrain to the first few batches
+if args.peek == 0:
+    args.peek = args.batch * int(len(codes) / args.batch)
+else:
+    args.peek = args.batch * int(args.peek / args.batch)
+
+codes = codes.iloc[:args.peek]  # constrain to the first few batches
 hf_codes = Dataset.from_pandas(codes)
 
 transformers_logging.set_verbosity_error()
