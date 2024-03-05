@@ -11,8 +11,9 @@ import torch
 import os
 from torch.utils.data import TensorDataset, SequentialSampler, DataLoader
 
-os.environ['http_proxy'] = 'http://127.0.0.1:7890'
-os.environ['https_proxy'] = 'http://127.0.0.1:7890'
+# os.environ['http_proxy'] = 'http://127.0.0.1:7890'
+# os.environ['https_proxy'] = 'http://127.0.0.1:7890'
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 from utils.file_operations import *
 from utils.model_operations import *
@@ -23,6 +24,9 @@ from config.bleu_config import *
 from evaluator import smooth_bleu
 from evaluator.bleu import _bleu
 from evaluator.CodeBLEU import calc_code_bleu
+
+from transformers import (AutoModelForCausalLM, AutoTokenizer)
+import math
 
 class BleuRater(object):
     def __init__(self):
@@ -37,7 +41,7 @@ class BleuRater(object):
         # load server side CodeT5 model
         server_config = ServerConfig()
         _, self.model, self.tokenizer = build_or_load_gen_model(server_config)
-        self.device = 'cuda:2'
+        self.device = 'cuda:3'
         self.model.to(self.device)
 
         self.eval_batch_size = 24
@@ -146,8 +150,62 @@ class BleuRater(object):
 
         return result
 
+    def batchify(self, data, batch_size):
+        """Yield consecutive batches of the specified size from the data."""
+        for i in range(0, len(data), batch_size):
+            yield data[i:i + batch_size]
+    
+    def process_batch(self, sources, model, tokenizer):
+        ipt = tokenizer(sources, return_tensors="pt", padding=True, truncation=True, max_length=300).to(self.device)
+        with torch.no_grad():
+            outputs = model(**ipt, labels=ipt.input_ids)
+            loss = outputs.loss
+            logits = outputs.logits
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = ipt.input_ids[..., 1:].contiguous()
+
+            import torch.nn.functional as F
+            loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1), reduction='none')
+            mask = ipt.attention_mask[..., 1:].contiguous()
+            loss = (loss * mask.view(-1)).sum() / mask.sum()
+        return loss.item()
+    
+    # calculate perplexity of the code snippets
+    def eval_perplexity(self, eval_examples, model, tokenizer):
+        # compute the perplexity of original codes
+        sources = [example.source for example in eval_examples]
+
+        batch_losses = []
+        total_batches = len(sources) // self.eval_batch_size + (0 if len(sources) % self.eval_batch_size == 0 else 1)
+        for batch in tqdm(self.batchify(sources, self.eval_batch_size), total=total_batches, desc="Processing original batches"):
+            batch_loss = self.process_batch(batch, model, tokenizer)
+            batch_losses.append(batch_loss)
+    
+        logger.info("***** Eval ppl: Original *****")
+        logger.info("  %s", str(math.exp(sum(batch_losses) / len(batch_losses))))
+
+        # compute the perplexity of the obfuscated codes
+        obfuscates = [example.obfuscate[0] for example in eval_examples]
+
+        batch_losses = []
+        total_batches = len(obfuscates) // self.eval_batch_size + (0 if len(obfuscates) % self.eval_batch_size == 0 else 1)
+        for batch in tqdm(self.batchify(obfuscates, self.eval_batch_size), total=total_batches, desc="Processing obfuscated batches"):
+            batch_loss = self.process_batch(batch, model, tokenizer)
+            batch_losses.append(batch_loss)
+
+        logger.info("***** Eval ppl: Obfuscated *****")
+        logger.info("  %s", str(math.exp(sum(batch_losses) / len(batch_losses))))
+
 if __name__ == "__main__":
     bleu_rater = BleuRater()
     bleu_rater.prepare_examples()  # before feeding into the model
     bleu_config = BleuConfig()
-    bleu_rater.eval_bleu_epoch(bleu_config, TensorDataset(bleu_rater.data[:, 0, :][0]), bleu_rater.examples, bleu_rater.model, bleu_rater.tokenizer, bleu_config.split_tag, bleu_config.criteria)
+    # bleu_rater.eval_bleu_epoch(bleu_config, TensorDataset(bleu_rater.data[:, 0, :][0]), bleu_rater.examples, bleu_rater.model, bleu_rater.tokenizer, bleu_config.split_tag, bleu_config.criteria)
+
+    # evaluate perplexity
+    ppl_model = AutoModelForCausalLM.from_pretrained("gpt2", torch_dtype=torch.float16)
+    ppl_tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    ppl_tokenizer.pad_token = ppl_tokenizer.eos_token
+    ppl_tokenizer.padding_side = 'right'
+    ppl_model.to(bleu_rater.device)
+    bleu_rater.eval_perplexity(bleu_rater.examples, ppl_model, ppl_tokenizer)
