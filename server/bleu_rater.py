@@ -10,6 +10,7 @@ from tqdm import tqdm
 import torch
 import os
 from torch.utils.data import TensorDataset, SequentialSampler, DataLoader
+import statistics
 
 # os.environ['http_proxy'] = 'http://127.0.0.1:7890'
 # os.environ['https_proxy'] = 'http://127.0.0.1:7890'
@@ -25,18 +26,15 @@ from evaluator import smooth_bleu
 from evaluator.bleu import _bleu
 from evaluator.CodeBLEU import calc_code_bleu
 
-from transformers import (AutoModelForCausalLM, AutoTokenizer)
 import math
 
 class BleuRater(object):
-    def __init__(self):
-
-        self.t0 = time.time()
+    def __init__(self, batch_size):
 
         # load examples from file for rating
-        self.client_output = '/home/ugproj/daniel/CodeSearchNet/proj/dataset/client_output.jsonl'
-        self.examples = read_summarize_examples(self.client_output)
-        calc_stats(self.examples)
+        # self.client_output = '/home/ugproj/daniel/CodeSearchNet/proj/dataset/client_output.jsonl'
+        # self.examples = read_summarize_examples(self.client_output)
+        # calc_stats(self.examples)
 
         # load server side CodeT5 model
         server_config = ServerConfig()
@@ -44,32 +42,34 @@ class BleuRater(object):
         self.device = 'cuda:3'
         self.model.to(self.device)
 
-        self.eval_batch_size = 24
+        self.eval_batch_size = batch_size
         self.max_source_length = 256
 
         logger.info("  " + "***** Rating *****")
         logger.info("  Batch size = %d", self.eval_batch_size)
 
     # prepare examples for rating (eval_examples, eval_data)
-    def prepare_examples(self):
+    def prepare_examples(self, inputs, labels):
+        # save Example objects into self.examples
+        self.examples = read_summarize_examples(inputs, labels)
+
         tuple_examples = [(example, idx, self.tokenizer, self.max_source_length) 
                           for idx, example in enumerate(self.examples)]
         with multiprocessing.Pool(multiprocessing.cpu_count()) as pool:
             features = pool.map(
-                convert_examples_to_features,
-                tqdm(tuple_examples, total=len(tuple_examples))
+                convert_examples_to_features, tuple_examples
             )  # from tokens to ids
         # features(dev): 320 examples * 2 code snippets * 256 token_ids
         all_source_ids = torch.tensor(features, dtype=torch.long)
         self.data = TensorDataset(all_source_ids)
         # torch.Size([320, 2, 256])
-        logger.info(f"  features shape: {self.data.tensors[0].shape}")
+        # logger.info(f"  features shape: {self.data.tensors[0].shape}")
 
     # calculate bleu score
     def eval_bleu_epoch(self, args, eval_data, eval_examples, model, tokenizer, split_tag, criteria):
-        logger.info("  ***** Running bleu evaluation on {} data*****".format(split_tag))
-        logger.info("  Num examples = %d", len(eval_examples))
-        logger.info("  Batch size = %d", self.eval_batch_size)
+        # logger.info("  ***** Running bleu evaluation on {} data*****".format(split_tag))
+        # logger.info("  Num examples = %d", len(eval_examples))
+        # logger.info("  Batch size = %d", self.eval_batch_size)
         eval_sampler = SequentialSampler(eval_data)
         if args.data_num == -1:
             eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=self.eval_batch_size,
@@ -80,7 +80,8 @@ class BleuRater(object):
         model.eval()
         pred_ids = []
         bleu, codebleu = 0.0, 0.0
-        for batch in tqdm(eval_dataloader, total=len(eval_dataloader), desc="Eval bleu for {} set".format(split_tag)):
+        # for batch in tqdm(eval_dataloader, total=len(eval_dataloader), desc="Eval bleu for {} set".format(split_tag)):
+        for batch in eval_dataloader:
             source_ids = batch[0].to(self.device)
             source_mask = source_ids.ne(tokenizer.pad_token_id)
             with torch.no_grad():
@@ -144,11 +145,11 @@ class BleuRater(object):
             if args.task == 'concode':
                 result['codebleu'] = codebleu * 100
 
-        logger.info("***** Eval results *****")
-        for key in sorted(result.keys()):
-            logger.info("  %s = %s", key, str(round(result[key], 4)))
+        # logger.info("***** Eval results *****")
+        # for key in sorted(result.keys()):
+        #     logger.info("  %s = %s", key, str(round(result[key], 4)))
 
-        return result
+        return result['bleu']
 
     def batchify(self, data, batch_size):
         """Yield consecutive batches of the specified size from the data."""
@@ -196,16 +197,46 @@ class BleuRater(object):
         logger.info("***** Eval ppl: Obfuscated *****")
         logger.info("  %s", str(math.exp(sum(batch_losses) / len(batch_losses))))
 
+
 if __name__ == "__main__":
-    bleu_rater = BleuRater()
-    bleu_rater.prepare_examples()  # before feeding into the model
+
+    # construct the model and wait for the data input
+    batch_size = 64
+    bleu_rater = BleuRater(batch_size)
     bleu_config = BleuConfig()
-    # bleu_rater.eval_bleu_epoch(bleu_config, TensorDataset(bleu_rater.data[:, 0, :][0]), bleu_rater.examples, bleu_rater.model, bleu_rater.tokenizer, bleu_config.split_tag, bleu_config.criteria)
+
+    # load from jsonl file, construct batches in memory, and send for inference
+    jsonfile = '/home/ugproj/daniel/CodeSearchNet/proj/dataset/client_output.jsonl'
+    inputs, labels, bleu = [], [], []
+    with open(jsonfile, encoding="utf-8") as f:
+        total_lines = sum(1 for _ in f)
+        f.seek(0)
+        for idx, line in enumerate(f):
+            line = line.strip()
+            js = json.loads(line)
+            inputs.append(js['code_string'])
+            labels.append(js['target_summarize'])
+
+            if (idx+1) % 500 == 0:
+                logger.info(f"{idx}/{total_lines}, mean bleu: {statistics.mean(bleu)}")
+            
+            if len(inputs) < batch_size:
+                continue
+            else:
+                # send the batch to the model (will get a bleu reward)
+                bleu_rater.prepare_examples(inputs, labels)  # before feeding into the model
+                codebleu = bleu_rater.eval_bleu_epoch(bleu_config, TensorDataset(bleu_rater.data[:, 0, :][0]), bleu_rater.examples, 
+                                                      bleu_rater.model, bleu_rater.tokenizer, bleu_config.split_tag, bleu_config.criteria)
+                inputs, labels = [], []
+                bleu.append(codebleu)
+
+    # analyze the distribution of bleu rewards
+    logger.info(f"mean: {statistics.mean(bleu)}, stddev: {statistics.stdev(bleu)}, max: {max(bleu)}, min: {min(bleu)}")
 
     # evaluate perplexity
-    ppl_model = AutoModelForCausalLM.from_pretrained("gpt2", torch_dtype=torch.float16)
-    ppl_tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    ppl_tokenizer.pad_token = ppl_tokenizer.eos_token
-    ppl_tokenizer.padding_side = 'right'
-    ppl_model.to(bleu_rater.device)
-    bleu_rater.eval_perplexity(bleu_rater.examples, ppl_model, ppl_tokenizer)
+    # ppl_model = AutoModelForCausalLM.from_pretrained("gpt2", torch_dtype=torch.float16)
+    # ppl_tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    # ppl_tokenizer.pad_token = ppl_tokenizer.eos_token
+    # ppl_tokenizer.padding_side = 'right'
+    # ppl_model.to(bleu_rater.device)
+    # bleu_rater.eval_perplexity(bleu_rater.examples, ppl_model, ppl_tokenizer)
