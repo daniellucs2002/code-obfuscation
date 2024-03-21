@@ -199,6 +199,19 @@ def bleuFromMaps(m1, m2):
     return [s * 100.0 / num for s in score]
 
 
+# @return is not the average value
+def bleuFromMaps2(m1, m2):
+    scores = []  # Initialize an empty list to store scores for each matched pair
+
+    for key in m1:
+        if key in m2:
+            bl = bleu(m1[key], m2[key][0])  # Calculate BLEU score for the matched pair
+            scores.append(bl[0])
+
+    # Instead of averaging, return the list of scores
+    return [s * 100.0 for s in scores]
+
+
 if __name__ == '__main__':
     reference_file = sys.argv[1]
     predictions = []

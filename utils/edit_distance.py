@@ -31,7 +31,7 @@ def word_level_edit_distance(pair):
                 distance_matrix[i-1][j-1] + cost  # Substitution
             )
     
-    return distance_matrix[-1][-1]
+    return distance_matrix[-1][-1] / max(len(words1), len(words2))
 
 
 # Use multiprocessing to calculate distances in parallel

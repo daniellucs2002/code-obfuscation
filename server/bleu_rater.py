@@ -3,7 +3,6 @@
 import sys
 sys.path.append('/home/ugproj/daniel/CodeSearchNet/proj')
 
-import time
 import multiprocessing
 from logger import logger
 from tqdm import tqdm
@@ -27,6 +26,7 @@ from evaluator.bleu import _bleu
 from evaluator.CodeBLEU import calc_code_bleu
 
 import math
+import json
 
 class BleuRater(object):
     def __init__(self, batch_size):
@@ -39,7 +39,7 @@ class BleuRater(object):
         # load server side CodeT5 model
         server_config = ServerConfig()
         _, self.model, self.tokenizer = build_or_load_gen_model(server_config)
-        self.device = 'cuda:3'
+        self.device = 'cuda:2'
         self.model.to(self.device)
 
         self.eval_batch_size = batch_size
@@ -135,6 +135,8 @@ class BleuRater(object):
 
             if args.task == 'summarize':
                 (goldMap, predictionMap) = smooth_bleu.computeMaps(predictions, gold_fn)
+                scores_list = smooth_bleu.bleuFromMaps2(goldMap, predictionMap)
+                rounded_scores = [round(score, 2) for score in scores_list]
                 bleu = round(smooth_bleu.bleuFromMaps(goldMap, predictionMap)[0], 2)
             else:
                 bleu = round(_bleu(gold_fn, output_fn), 2)
@@ -149,7 +151,7 @@ class BleuRater(object):
         # for key in sorted(result.keys()):
         #     logger.info("  %s = %s", key, str(round(result[key], 4)))
 
-        return result['bleu']
+        return result['bleu'], rounded_scores
 
     def batchify(self, data, batch_size):
         """Yield consecutive batches of the specified size from the data."""
